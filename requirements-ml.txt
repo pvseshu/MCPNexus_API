@@ -1,0 +1,4 @@
+# Heavy ML deps, installed separately so the base image stays quick to rebuild.
+# Pulled in from Phase 4 onwards (BGE-Large embeddings, run locally).
+torch>=2.4
+sentence-transformers>=3.0

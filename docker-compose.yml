@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: mcpnexus-postgres
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mcpnexus}
+      POSTGRES_USER: ${POSTGRES_USER:-mcpnexus}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mcpnexus}
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mcpnexus}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: mcpnexus-qdrant
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrantdata:/qdrant/storage
+
+  web:
+    build: .
+    container_name: mcpnexus-web
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             python manage.py runserver 0.0.0.0:8000"
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      QDRANT_URL: http://qdrant:6333
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - models:/models
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+volumes:
+  pgdata:
+  qdrantdata:
+  models:
