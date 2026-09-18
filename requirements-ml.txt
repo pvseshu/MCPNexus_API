@@ -1,4 +1,14 @@
-# Heavy ML deps, installed separately so the base image stays quick to rebuild.
-# Pulled in from Phase 4 onwards (BGE-Large embeddings, run locally).
+# NOT CURRENTLY REQUIRED.
+#
+# Originally added to run BGE-Large embeddings in-process (loading the model
+# directly into this Django app via sentence-transformers, on top of torch).
+# We switched to calling a local Ollama server instead (see OLLAMA_URL /
+# OLLAMA_EMBEDDING_MODEL in mcp_nexus/settings.py and embeddings/services.py)
+# - Ollama runs the model as its own separate process and this app just
+# hits its HTTP API, so torch/sentence-transformers don't need to be
+# installed here at all.
+#
+# Left in place for reference / in case we ever move embedding generation
+# back in-process instead of going through Ollama.
 torch>=2.4
 sentence-transformers>=3.0

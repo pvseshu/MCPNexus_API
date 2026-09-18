@@ -19,6 +19,7 @@ class Tool(models.Model):
         "api_registry.Api", on_delete=models.CASCADE, related_name="tools"
     )
     name = models.CharField(max_length=300)
+    display_name = models.CharField(max_length=300, blank=True, default="")
     description = models.TextField(blank=True)
     http_method = models.CharField(max_length=10, choices=METHOD_CHOICES, default="GET")
     path = models.CharField(max_length=1000)
@@ -28,6 +29,8 @@ class Tool(models.Model):
     request_schema = models.JSONField(default=dict, blank=True)
     response_schema = models.JSONField(default=dict, blank=True)
     required_security_groups = models.JSONField(default=list, blank=True)
+    # Permission string the governance layer checks (e.g. "MCP_GETCUSTOMER").
+    required_permission = models.CharField(max_length=200, blank=True, default="")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

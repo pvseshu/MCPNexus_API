@@ -130,8 +130,9 @@ QDRANT_API_KEY = env("QDRANT_API_KEY", "") or None
 QDRANT_PROJECTS_COLLECTION = env("QDRANT_PROJECTS_COLLECTION", "mcp_projects")
 QDRANT_TOOLS_COLLECTION = env("QDRANT_TOOLS_COLLECTION", "mcp_tools")
 
-# --- Embeddings ---------------------------------------------------------
-EMBEDDING_MODEL_NAME = env("EMBEDDING_MODEL_NAME", "BAAI/bge-large-en-v1.5")
+# --- Embeddings (served locally via Ollama, e.g. `ollama run bge-large`) ---
+OLLAMA_URL = env("OLLAMA_URL", "http://localhost:11434")
+OLLAMA_EMBEDDING_MODEL = env("OLLAMA_EMBEDDING_MODEL", "bge-large")
 EMBEDDING_DIM = int(env("EMBEDDING_DIM", "1024"))
 
 # --- Azure OpenAI (GPT-5.2) --------------------------------------------
@@ -139,6 +140,9 @@ AZURE_OPENAI_ENDPOINT = env("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_KEY = env("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_API_VERSION = env("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 AZURE_OPENAI_DEPLOYMENT = env("AZURE_OPENAI_DEPLOYMENT", "gpt-5.2")
+
+# --- MCP servers ---------------------------------------------------------
+MCP_SERVER_BASE_URL = env("MCP_SERVER_BASE_URL", "http://localhost:8000/mcp")
 
 # --- Orchestration tuning ----------------------------------------------
 PROJECT_MATCH_THRESHOLD = float(env("PROJECT_MATCH_THRESHOLD", "0.45"))
