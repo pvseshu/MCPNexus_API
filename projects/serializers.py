@@ -112,6 +112,7 @@ class GenerateMcpServerRequestSerializer(serializers.Serializer):
 
 class ApplicationOutputSerializer(serializers.Serializer):
     id = serializers.IntegerField()
+    publicId = serializers.CharField()
     name = serializers.CharField()
     appCode = serializers.CharField()
     carId = serializers.CharField(allow_blank=True)

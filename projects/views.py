@@ -713,6 +713,7 @@ def generate_mcp_server(request):
         {
             "application": {
                 "id": project.id,
+                "publicId": project.public_id,
                 "name": project.name,
                 "appCode": project.app_code,
                 "carId": project.car_id,

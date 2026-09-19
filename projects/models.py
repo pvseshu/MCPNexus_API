@@ -1,4 +1,17 @@
+import secrets
+import string
+
 from django.db import models
+from django.utils.text import slugify
+
+_PUBLIC_ID_ALPHABET = string.ascii_lowercase + string.digits
+
+
+def generate_public_id(base):
+    """Public id like 'app-spot-x7k2m9': a slug of `base` plus a random suffix (not derived from any counter)."""
+    slug = slugify(base)[:60] or "app"
+    suffix = "".join(secrets.choice(_PUBLIC_ID_ALPHABET) for _ in range(6))
+    return f"app-{slug}-{suffix}"
 
 
 class Project(models.Model):
@@ -11,6 +24,9 @@ class Project(models.Model):
         ("disabled", "disabled"),
     ]
 
+    # Opaque external identifier for embeds / other systems (the integer id stays internal).
+    # Generated once when the project is first saved and never changed afterwards.
+    public_id = models.CharField(max_length=100, unique=True, editable=False)
     name = models.CharField(max_length=200, unique=True)
     description = models.TextField(blank=True)
     openapi_url = models.URLField(max_length=1000, blank=True)
@@ -45,6 +61,18 @@ class Project(models.Model):
 
     class Meta:
         ordering = ["name"]
+
+    def save(self, *args, **kwargs):
+        if not self.public_id:
+            base = self.app_code or self.name
+            for _ in range(10):  # retry on the (very unlikely) suffix collision
+                candidate = generate_public_id(base)
+                if not Project.objects.filter(public_id=candidate).exists():
+                    self.public_id = candidate
+                    break
+            else:
+                raise RuntimeError("Could not generate a unique public_id")
+        super().save(*args, **kwargs)
 
     def __str__(self):
         return self.name
