@@ -43,8 +43,7 @@ class Project(models.Model):
     department = models.CharField(max_length=200, blank=True, default="")
     swagger_urls = models.JSONField(default=list, blank=True)
     # Auth config for reaching the app's own OpenAPI/runtime endpoints. Secrets
-    # (e.g. servicePassword) are stripped before saving - see
-    # projects.views._sanitize_auth_config.
+    # (e.g. servicePassword) are encrypted at rest - see projects.credentials.
     auth_config = models.JSONField(default=dict, blank=True)
     # Freeform business context fed to the AI agent (businessPurpose, keyUseCases,
     # importantTerminology, aiGuidance, ...). See API.md aiContext shape.

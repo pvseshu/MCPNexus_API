@@ -141,6 +141,13 @@ AZURE_OPENAI_API_KEY = env("AZURE_OPENAI_API_KEY", "")
 AZURE_OPENAI_API_VERSION = env("AZURE_OPENAI_API_VERSION", "2024-12-01-preview")
 AZURE_OPENAI_DEPLOYMENT = env("AZURE_OPENAI_DEPLOYMENT", "gpt-5.2")
 
+# Encrypts stored app credentials (auth_config secrets). Falls back to SECRET_KEY; changing
+# either one makes previously saved secrets unreadable.
+CREDENTIAL_ENCRYPTION_KEY = env("CREDENTIAL_ENCRYPTION_KEY", "")
+
+# Spotify only: Run Test uses this bearer token instead of calling the token API.
+SPOTIFY_BEARER_TOKEN = env("SPOTIFY_BEARER_TOKEN", "")
+
 # --- MCP servers ---------------------------------------------------------
 MCP_SERVER_BASE_URL = env("MCP_SERVER_BASE_URL", "http://localhost:8000/mcp")
 

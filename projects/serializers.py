@@ -26,15 +26,46 @@ class OnboardProjectResponseSerializer(serializers.Serializer):
 # --- App Registration wizard (API.md) -----------------------------------
 
 class AuthBlueConfigSerializer(serializers.Serializer):
-    tokenUrl = serializers.URLField()
-    serviceId = serializers.CharField(max_length=200)
-    servicePassword = serializers.CharField(max_length=500, allow_blank=True)
-    scopeGroups = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    tokenUrl = serializers.CharField(allow_blank=True, required=False, default="")
+    serviceId = serializers.CharField(max_length=200, allow_blank=True, required=False, default="")
+    servicePassword = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+    scopeGroups = serializers.ListField(child=serializers.CharField(allow_blank=True), required=False, default=list)
+
+
+class GenericOAuthConfigSerializer(serializers.Serializer):
+    tokenUrl = serializers.CharField(allow_blank=True, required=False, default="")
+    clientId = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+    clientSecret = serializers.CharField(max_length=500, allow_blank=True, required=False, default="")
+    credentialStyle = serializers.ChoiceField(choices=["basic_auth", "json_body"], required=False, default="basic_auth")
+    requestBodyTemplate = serializers.CharField(allow_blank=True, required=False, default="")
 
 
 class AuthConfigSerializer(serializers.Serializer):
     type = serializers.CharField(max_length=50)
     authBlue = AuthBlueConfigSerializer(required=False)
+    oauth = GenericOAuthConfigSerializer(required=False)
+    # Stored but not used yet.
+    idaas = serializers.DictField(required=False)
+
+    # Only the block of the selected type has to be complete; the UI sends the others as blank defaults.
+    REQUIRED_FIELDS = {
+        "authblue": ("authBlue", ["tokenUrl", "serviceId"]),
+        "oauth": ("oauth", ["tokenUrl", "clientId"]),
+    }
+
+    def validate(self, attrs):
+        # The UI sends [""] for an empty scope list.
+        if "authBlue" in attrs:
+            attrs["authBlue"]["scopeGroups"] = [g for g in attrs["authBlue"]["scopeGroups"] if g.strip()]
+        if "scope" in attrs.get("idaas", {}):
+            attrs["idaas"]["scope"] = [g for g in attrs["idaas"]["scope"] if not isinstance(g, str) or g.strip()]
+        block, fields = self.REQUIRED_FIELDS.get(attrs["type"], (None, []))
+        if block:
+            values = attrs.get(block) or {}
+            errors = {f: ["This field may not be blank."] for f in fields if not values.get(f)}
+            if errors:
+                raise serializers.ValidationError({block: errors})
+        return attrs
 
 
 class AnalyzeSpecRequestSerializer(serializers.Serializer):

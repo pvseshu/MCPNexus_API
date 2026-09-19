@@ -17,6 +17,7 @@ from .models import Project
 from api_registry.models import Api
 from tools.models import Tool, ToolParameter
 from auth_governance.models import AccessRequest
+from .credentials import TokenError, fetch_token, mask_secrets, prepare_for_storage
 from embeddings.services import index_application, reindex_project
 from .serializers import (
     ProjectDetailSerializer,
@@ -247,53 +248,14 @@ def generate_camel_tool_name(method, path):
     return verb + camel[:1].upper() + camel[1:]
 
 
-def get_authblue_token(auth_blue_cfg):
-    """Best-effort fetch of an AuthBlue bearer token to authenticate spec fetches.
-
-    AuthBlue is an internal service - if it isn't reachable from this
-    environment we log a warning and fall back to an unauthenticated fetch
-    rather than failing the whole request outright.
-    """
-    token_url = auth_blue_cfg.get("tokenUrl")
-    if not token_url:
-        return None
-    try:
-        resp = httpx.post(
-            token_url,
-            json={
-                "serviceId": auth_blue_cfg.get("serviceId"),
-                "servicePassword": auth_blue_cfg.get("servicePassword"),
-                "scopeGroups": auth_blue_cfg.get("scopeGroups", []),
-            },
-            timeout=10.0,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        return data.get("access_token") or data.get("token")
-    except Exception as e:
-        logger.warning("AuthBlue token fetch from %s failed (%s) - fetching spec unauthenticated.", token_url, e)
-        return None
-
-
 def build_auth_headers(auth_config):
-    if not auth_config:
+    """Authorization header for downloading specs; best-effort, falls back to unauthenticated."""
+    try:
+        token = fetch_token(auth_config)
+    except TokenError as e:
+        logger.warning("Token fetch failed (%s) - fetching spec unauthenticated.", e)
         return {}
-    if auth_config.get("type") == "authblue" and auth_config.get("authBlue"):
-        token = get_authblue_token(auth_config["authBlue"])
-        if token:
-            return {"Authorization": f"Bearer {token}"}
-    return {}
-
-
-def _sanitize_auth_config(auth_config):
-    """Strip secrets (e.g. servicePassword) before persisting auth_config."""
-    if not auth_config:
-        return {}
-    sanitized = json.loads(json.dumps(auth_config))
-    auth_blue = sanitized.get("authBlue")
-    if isinstance(auth_blue, dict) and "servicePassword" in auth_blue:
-        auth_blue["servicePassword"] = ""
-    return sanitized
+    return {"Authorization": f"Bearer {token}"} if token else {}
 
 
 def fetch_spec(url, headers):
@@ -631,6 +593,7 @@ def generate_mcp_server(request):
         resolved.append((sel, discovered))
 
     app_code = application["appCode"]
+    existing_project = Project.objects.filter(app_code=app_code).first()
     mcp_endpoint_url = f"{settings.MCP_SERVER_BASE_URL.rstrip('/')}/{app_code.lower()}"
 
     project, _created = Project.objects.update_or_create(
@@ -646,7 +609,7 @@ def generate_mcp_server(request):
             "support_dl": application.get("supportDL", ""),
             "department": application.get("department", ""),
             "swagger_urls": application["swaggerUrls"],
-            "auth_config": _sanitize_auth_config(application.get("authConfig")),
+            "auth_config": prepare_for_storage(application.get("authConfig"), existing_project.auth_config if existing_project else None),
             "ai_context": full_ai_context(application.get("aiContext")),
             "status": "active",
             "is_ai_ready": True,
@@ -823,10 +786,7 @@ def full_ai_context(ai_context):
 def application_detail(project):
     # Unlike the server status, the application status also has a Pending state.
     app_status = "Pending" if project.status == "pending" else SERVER_STATUSES.get(project.status, "Disabled")
-    auth_config = json.loads(json.dumps(project.auth_config or {}))
-    auth_blue = auth_config.get("authBlue")
-    if isinstance(auth_blue, dict):
-        auth_blue["servicePassword"] = ""  # never stored, never returned
+    auth_config = mask_secrets(project.auth_config)  # secrets are never returned
     return {
         "id": str(project.id),
         "publicId": project.public_id,
@@ -944,7 +904,7 @@ def mcp_server_detail(request, server_id):
         project.swagger_urls = data["swaggerUrls"]
         project.openapi_url = data["swaggerUrls"][0]
     if "authConfig" in data:
-        project.auth_config = _sanitize_auth_config(data["authConfig"])
+        project.auth_config = prepare_for_storage(data["authConfig"], project.auth_config)
     if "aiContext" in data:
         project.ai_context = data["aiContext"]
     if "aiSummaryConfig" in data:
