@@ -81,6 +81,9 @@ class AiContextSerializer(serializers.Serializer):
     keyUseCases = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     commonWorkflows = serializers.ListField(child=serializers.CharField(), required=False, default=list)
     importantTerminology = ImportantTermSerializer(many=True, required=False, default=list)
+    intendedConsumers = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    usageGuidelines = serializers.CharField(allow_blank=True, required=False, default="")
+    restrictions = serializers.CharField(allow_blank=True, required=False, default="")
     aiGuidance = serializers.CharField(allow_blank=True, required=False, default="")
 
 
@@ -144,3 +147,100 @@ class GenerateMcpServerResponseSerializer(serializers.Serializer):
     application = ApplicationOutputSerializer()
     mcpServer = McpServerOutputSerializer()
     mcpTools = McpToolOutputSerializer(many=True)
+
+
+class NavigationCountsSerializer(serializers.Serializer):
+    mcpServers = serializers.IntegerField()
+    mcpTools = serializers.IntegerField()
+    pendingAccessRequests = serializers.IntegerField()
+
+
+class McpServerApplicationSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    publicId = serializers.CharField()
+    name = serializers.CharField()
+    appCode = serializers.CharField()
+    owner = serializers.CharField()
+    ownerEmail = serializers.CharField()
+    department = serializers.CharField()
+    isAiReady = serializers.BooleanField()
+
+
+class McpServerSummarySerializer(serializers.Serializer):
+    id = serializers.CharField()
+    name = serializers.CharField()
+    version = serializers.CharField()
+    status = serializers.CharField()
+    healthStatus = serializers.CharField()
+    endpointUrl = serializers.CharField()
+    transportType = serializers.CharField()
+    toolsCount = serializers.IntegerField()
+    isPublishedToCatalog = serializers.BooleanField()
+    lastDeployed = serializers.DateTimeField()
+    usedByApps = serializers.ListField(child=serializers.CharField())
+    dependsOnServers = serializers.ListField(child=serializers.CharField())
+    application = McpServerApplicationSerializer()
+
+
+class ListMcpServersResponseSerializer(serializers.Serializer):
+    servers = McpServerSummarySerializer(many=True)
+
+
+class CatalogVisibilityRequestSerializer(serializers.Serializer):
+    isPublishedToCatalog = serializers.BooleanField()
+
+
+class CatalogVisibilityResponseSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    isPublishedToCatalog = serializers.BooleanField()
+
+
+class McpServerApiParameterSerializer(serializers.Serializer):
+    name = serializers.CharField()
+    location = serializers.CharField()
+    type = serializers.CharField()
+    required = serializers.BooleanField()
+    description = serializers.CharField(allow_blank=True)
+    exampleValue = serializers.CharField(allow_blank=True)
+
+
+class McpServerApiSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    endpoint = serializers.CharField()
+    method = serializers.CharField()
+    summary = serializers.CharField(allow_blank=True)
+    description = serializers.CharField(allow_blank=True)
+    tag = serializers.CharField()
+    suggestedToolName = serializers.CharField()
+    enabledForMcp = serializers.BooleanField()
+    parameters = McpServerApiParameterSerializer(many=True)
+
+
+class McpServerDetailResponseSerializer(serializers.Serializer):
+    server = McpServerSummarySerializer()
+    application = serializers.DictField()
+    apis = McpServerApiSerializer(many=True)
+
+
+class AiSummaryConfigSerializer(serializers.Serializer):
+    enabled = serializers.BooleanField()
+    title = serializers.CharField(allow_blank=True, required=False, default="")
+    instructions = serializers.CharField(allow_blank=True, required=False, default="")
+    includedApiIds = serializers.ListField(child=serializers.CharField(), required=False, default=list)
+    sampleOutput = serializers.CharField(allow_blank=True, required=False, default="")
+
+
+class UpdateMcpServerRequestSerializer(serializers.Serializer):
+    """Every field is optional; only the ones sent are changed."""
+
+    name = serializers.CharField(max_length=200, required=False)
+    description = serializers.CharField(allow_blank=True, required=False)
+    owner = serializers.CharField(max_length=200, required=False)
+    ownerEmail = serializers.EmailField(allow_blank=True, required=False)
+    supportDL = serializers.EmailField(allow_blank=True, required=False)
+    department = serializers.CharField(max_length=200, allow_blank=True, required=False)
+    status = serializers.ChoiceField(choices=["Active", "Maintenance", "Disabled"], required=False)
+    swaggerUrls = serializers.ListField(child=serializers.URLField(), min_length=1, required=False)
+    authConfig = AuthConfigSerializer(required=False)
+    aiContext = AiContextSerializer(required=False)
+    aiSummaryConfig = AiSummaryConfigSerializer(required=False)

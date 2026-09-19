@@ -117,6 +117,11 @@ def _project_text(project):
         ctx.get("businessPurpose", ""),
         ctx.get("businessDomain", ""),
         " ".join(ctx.get("keyUseCases", [])),
+        " ".join(ctx.get("commonWorkflows", [])),
+        " ".join(f"{t.get('term', '')}: {t.get('definition', '')}" for t in ctx.get("importantTerminology", [])),
+        " ".join(ctx.get("intendedConsumers", [])),
+        ctx.get("usageGuidelines", ""),
+        ctx.get("restrictions", ""),
         ctx.get("aiGuidance", ""),
     ]
     return "\n".join(p for p in parts if p)
@@ -185,4 +190,35 @@ def index_application(project, tools):
         )
 
     logger.info("Indexed project %s + %d tool(s) into Qdrant.", project.id, len(tools))
+    return True
+
+
+def reindex_project(project):
+    """Re-embed just the project text, e.g. after its AI context was edited.
+
+    Best effort like index_application: returns False if Ollama/Qdrant is
+    unavailable, so the caller's save is never blocked by it.
+    """
+    client = _get_qdrant_client()
+    if client is None:
+        return False
+
+    from qdrant_client.models import PointStruct
+
+    vectors = _embed([_project_text(project)])
+    if vectors is None:
+        return False
+
+    _ensure_collection(client, settings.QDRANT_PROJECTS_COLLECTION)
+    client.upsert(
+        collection_name=settings.QDRANT_PROJECTS_COLLECTION,
+        points=[
+            PointStruct(
+                id=project.id,
+                vector=vectors[0],
+                payload={"project_id": project.id, "name": project.name, "app_code": project.app_code},
+            )
+        ],
+    )
+    logger.info("Re-indexed project %s into Qdrant.", project.id)
     return True

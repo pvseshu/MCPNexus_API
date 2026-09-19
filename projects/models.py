@@ -22,6 +22,7 @@ class Project(models.Model):
         ("active", "active"),
         ("failed", "failed"),
         ("disabled", "disabled"),
+        ("maintenance", "maintenance"),
     ]
 
     # Opaque external identifier for embeds / other systems (the integer id stays internal).
@@ -49,12 +50,15 @@ class Project(models.Model):
     # importantTerminology, aiGuidance, ...). See API.md aiContext shape.
     ai_context = models.JSONField(default=dict, blank=True)
     is_ai_ready = models.BooleanField(default=False)
+    # AI summary settings from the detail modal; null until someone configures it.
+    ai_summary_config = models.JSONField(null=True, blank=True)
 
     # --- MCP server (one per project, created on Generate MCP Server) ---
     mcp_endpoint_url = models.URLField(max_length=500, blank=True, default="")
     mcp_version = models.CharField(max_length=20, default="1.0.0", blank=True)
     mcp_transport_type = models.CharField(max_length=50, default="Streamable HTTP", blank=True)
     mcp_health_status = models.CharField(max_length=20, default="Unknown", blank=True)
+    is_published_to_catalog = models.BooleanField(default=False)
 
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)

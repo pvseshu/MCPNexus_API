@@ -7,6 +7,7 @@ import yaml
 import httpx
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Count
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -15,7 +16,8 @@ from drf_spectacular.utils import extend_schema
 from .models import Project
 from api_registry.models import Api
 from tools.models import Tool, ToolParameter
-from embeddings.services import index_application
+from auth_governance.models import AccessRequest
+from embeddings.services import index_application, reindex_project
 from .serializers import (
     ProjectDetailSerializer,
     OnboardProjectRequestSerializer,
@@ -24,6 +26,12 @@ from .serializers import (
     AnalyzeSpecResponseSerializer,
     GenerateMcpServerRequestSerializer,
     GenerateMcpServerResponseSerializer,
+    NavigationCountsSerializer,
+    ListMcpServersResponseSerializer,
+    McpServerDetailResponseSerializer,
+    UpdateMcpServerRequestSerializer,
+    CatalogVisibilityRequestSerializer,
+    CatalogVisibilityResponseSerializer,
 )
 
 logger = logging.getLogger(__name__)
@@ -639,7 +647,7 @@ def generate_mcp_server(request):
             "department": application.get("department", ""),
             "swagger_urls": application["swaggerUrls"],
             "auth_config": _sanitize_auth_config(application.get("authConfig")),
-            "ai_context": application.get("aiContext", {}),
+            "ai_context": full_ai_context(application.get("aiContext")),
             "status": "active",
             "is_ai_ready": True,
             "mcp_endpoint_url": mcp_endpoint_url,
@@ -744,3 +752,252 @@ def generate_mcp_server(request):
         },
         status=status.HTTP_201_CREATED,
     )
+
+
+@extend_schema(responses={200: NavigationCountsSerializer})
+@api_view(["GET"])
+def navigation_counts(request):
+    """
+    GET /api/navigation/counts
+    Badge numbers for the side menu, COUNT queries only.
+    """
+    return Response(
+        {
+            "mcpServers": Project.objects.count(),
+            "mcpTools": Tool.objects.count(),
+            "pendingAccessRequests": AccessRequest.objects.filter(status="pending").count(),
+        }
+    )
+
+
+SERVER_STATUSES = {"active": "Active", "maintenance": "Maintenance"}
+HEALTH_STATUSES = {"Healthy", "Degraded", "Offline"}
+
+
+def server_summary(project):
+    """One card in the MCP Servers list. Needs tools_count annotated on the project."""
+    return {
+        "id": f"mcp-{project.id}",
+        "name": f"{project.name} MCP",
+        "version": project.mcp_version,
+        # The UI only knows three states, so pending/failed projects show as Disabled.
+        "status": SERVER_STATUSES.get(project.status, "Disabled"),
+        "healthStatus": project.mcp_health_status if project.mcp_health_status in HEALTH_STATUSES else "Offline",
+        "endpointUrl": project.mcp_endpoint_url,
+        "transportType": project.mcp_transport_type,
+        "toolsCount": project.tools_count,
+        "isPublishedToCatalog": project.is_published_to_catalog,
+        "lastDeployed": project.updated_at,
+        # No consumer/dependency links are modelled yet.
+        "usedByApps": [],
+        "dependsOnServers": [],
+        "application": {
+            "id": str(project.id),
+            "publicId": project.public_id,
+            "name": project.name,
+            "appCode": project.app_code,
+            "owner": project.owner,
+            "ownerEmail": project.owner_email,
+            "department": project.department,
+            "isAiReady": project.is_ai_ready,
+        },
+    }
+
+
+def full_ai_context(ai_context):
+    """All nine aiContext fields, empty where an older record never stored them."""
+    empty = {
+        "businessPurpose": "",
+        "businessDomain": "",
+        "keyUseCases": [],
+        "commonWorkflows": [],
+        "importantTerminology": [],
+        "intendedConsumers": [],
+        "usageGuidelines": "",
+        "restrictions": "",
+        "aiGuidance": "",
+    }
+    return {**empty, **(ai_context or {})}
+
+
+def application_detail(project):
+    # Unlike the server status, the application status also has a Pending state.
+    app_status = "Pending" if project.status == "pending" else SERVER_STATUSES.get(project.status, "Disabled")
+    auth_config = json.loads(json.dumps(project.auth_config or {}))
+    auth_blue = auth_config.get("authBlue")
+    if isinstance(auth_blue, dict):
+        auth_blue["servicePassword"] = ""  # never stored, never returned
+    return {
+        "id": str(project.id),
+        "publicId": project.public_id,
+        "name": project.name,
+        "appCode": project.app_code,
+        "carId": project.car_id,
+        "description": project.description,
+        "owner": project.owner,
+        "ownerEmail": project.owner_email,
+        "supportDL": project.support_dl,
+        "department": project.department,
+        "status": app_status,
+        "isAiReady": project.is_ai_ready,
+        "lastUpdated": project.updated_at,
+        "mcpToolsCount": project.tools_count,
+        "swaggerUrls": project.swagger_urls,
+        "authConfig": auth_config,
+        "aiContext": full_ai_context(project.ai_context),
+        "aiSummaryConfig": project.ai_summary_config,
+    }
+
+
+def tool_as_api(tool):
+    """A saved tool in the shape the detail modal lists its APIs."""
+    return {
+        "id": str(tool.id),
+        "endpoint": tool.path,
+        "method": tool.http_method,
+        "summary": tool.summary,
+        "description": tool.description,
+        "tag": tool.tags[0] if tool.tags else "Uncategorized",
+        "suggestedToolName": tool.name,
+        "enabledForMcp": tool.status == "active",
+        "parameters": [
+            {
+                "name": param.name,
+                "location": param.location,
+                "type": param.data_type,
+                "required": param.required,
+                "description": param.description,
+                "exampleValue": param.default_value,
+            }
+            for param in tool.parameters.all()
+        ],
+    }
+
+
+NOT_FOUND = {"error": "MCP server not found."}
+DETAIL_FIELD_COLUMNS = {
+    "name": "name",
+    "description": "description",
+    "owner": "owner",
+    "ownerEmail": "owner_email",
+    "supportDL": "support_dl",
+    "department": "department",
+}
+PROJECT_STATUS_BY_LABEL = {"Active": "active", "Maintenance": "maintenance", "Disabled": "disabled"}
+
+
+def server_detail_payload(project):
+    return {
+        "server": server_summary(project),
+        "application": application_detail(project),
+        "apis": [tool_as_api(tool) for tool in project.tools.prefetch_related("parameters")],
+    }
+
+
+@extend_schema(methods=["GET"], responses={200: McpServerDetailResponseSerializer})
+@extend_schema(
+    methods=["PATCH"],
+    request=UpdateMcpServerRequestSerializer,
+    responses={200: McpServerDetailResponseSerializer},
+)
+@api_view(["GET", "PATCH"])
+def mcp_server_detail(request, server_id):
+    """
+    GET   /api/mcp-servers/{id}  full application record plus its saved tools.
+    PATCH /api/mcp-servers/{id}  partial update, only the fields sent are changed.
+    """
+    project = get_project_by_server_id(server_id)
+    if project is None:
+        return Response(NOT_FOUND, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        return Response(server_detail_payload(project))
+
+    fixed = [key for key in ("appCode", "carId") if key in request.data]
+    if fixed:
+        return Response(
+            {"error": f"{', '.join(fixed)} cannot be changed after registration."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    req = UpdateMcpServerRequestSerializer(data=request.data)
+    req.is_valid(raise_exception=True)
+    data = req.validated_data
+
+    if "name" in data and Project.objects.filter(name=data["name"]).exclude(id=project.id).exists():
+        return Response(
+            {"error": f"An application named '{data['name']}' already exists."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    for field, column in DETAIL_FIELD_COLUMNS.items():
+        if field in data:
+            setattr(project, column, data[field])
+    if "status" in data:
+        project.status = PROJECT_STATUS_BY_LABEL[data["status"]]
+        # Stopping the app takes its MCP server offline; activating brings it back.
+        if data["status"] == "Disabled":
+            project.mcp_health_status = "Offline"
+        elif data["status"] == "Active":
+            project.mcp_health_status = "Healthy"
+    if "swaggerUrls" in data:
+        project.swagger_urls = data["swaggerUrls"]
+        project.openapi_url = data["swaggerUrls"][0]
+    if "authConfig" in data:
+        project.auth_config = _sanitize_auth_config(data["authConfig"])
+    if "aiContext" in data:
+        project.ai_context = data["aiContext"]
+    if "aiSummaryConfig" in data:
+        project.ai_summary_config = data["aiSummaryConfig"]
+    project.save()
+
+    if {"name", "description", "aiContext"} & data.keys():
+        reindex_project(project)
+
+    return Response(server_detail_payload(project))
+
+
+@extend_schema(responses={200: ListMcpServersResponseSerializer})
+@api_view(["GET"])
+def list_mcp_servers(request):
+    """
+    GET /api/mcp-servers
+    Every registered MCP server with its application info and tool count.
+    """
+    projects = Project.objects.annotate(tools_count=Count("tools"))
+    return Response({"servers": [server_summary(p) for p in projects]})
+
+
+def get_project_by_server_id(server_id):
+    """Project (with tools_count) for an id like 'mcp-1', or None."""
+    match = re.fullmatch(r"mcp-(\d+)", server_id)
+    if not match:
+        return None
+    return Project.objects.annotate(tools_count=Count("tools")).filter(id=int(match.group(1))).first()
+
+
+@extend_schema(
+    request=CatalogVisibilityRequestSerializer,
+    responses={200: CatalogVisibilityResponseSerializer},
+)
+@api_view(["PUT"])
+def set_catalog_visibility(request, server_id):
+    """
+    PUT /api/mcp-servers/{id}/catalog-visibility
+    Publish a server to the MCP Catalog or make it private. Idempotent.
+    """
+    project = get_project_by_server_id(server_id)
+    if project is None:
+        return Response({"error": "MCP server not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    # Strict bool check: DRF's BooleanField would also accept "true", 1, etc.
+    value = request.data.get("isPublishedToCatalog") if hasattr(request.data, "get") else None
+    if not isinstance(value, bool):
+        return Response(
+            {"error": "isPublishedToCatalog is required and must be a boolean."},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+    project.is_published_to_catalog = value
+    project.save(update_fields=["is_published_to_catalog"])
+    return Response({"id": f"mcp-{project.id}", "isPublishedToCatalog": value})
