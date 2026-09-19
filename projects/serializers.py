@@ -48,6 +48,7 @@ class DiscoveredApiParameterSerializer(serializers.Serializer):
     required = serializers.BooleanField()
     description = serializers.CharField(allow_blank=True)
     exampleValue = serializers.CharField(allow_blank=True, required=False)
+    location = serializers.CharField(required=False)
 
 
 class DiscoveredApiSerializer(serializers.Serializer):

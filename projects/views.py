@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from urllib.parse import urljoin
 
 import yaml
 import httpx
@@ -293,6 +294,178 @@ def fetch_spec(url, headers):
     return parse_openapi_spec(resp.text)
 
 
+def resolve_ref(spec, obj, _depth=0):
+    """Follow local "$ref" pointers (e.g. '#/components/parameters/Foo') until a concrete object."""
+    while isinstance(obj, dict) and "$ref" in obj and _depth < 10:
+        ref = obj["$ref"]
+        if not isinstance(ref, str) or not ref.startswith("#/"):
+            return {}
+        node = spec
+        for part in ref[2:].split("/"):
+            node = node.get(part.replace("~1", "/").replace("~0", "~")) if isinstance(node, dict) else None
+        obj = node
+        _depth += 1
+    return obj if isinstance(obj, dict) else {}
+
+
+def collect_parameters(spec, path_item, operation):
+    """Path-level + operation-level parameters with $refs resolved; operation overrides path on (name, in)."""
+    merged = {}
+    for raw in list(path_item.get("parameters") or []) + list(operation.get("parameters") or []):
+        param_obj = resolve_ref(spec, raw)
+        if not param_obj.get("name"):
+            continue
+        merged[(param_obj["name"], param_obj.get("in", "query"))] = param_obj
+    return list(merged.values())
+
+
+def compute_base_url(spec, spec_url):
+    """Server URL the endpoints are called on.
+
+    OpenAPI 3: first entry of `servers` (a relative URL such as "/v1" is resolved against the
+    spec URL; "{var}" placeholders are filled from the variable defaults).
+    Swagger 2: `schemes` + `host` + `basePath`.
+    """
+    servers = spec.get("servers") or []
+    if servers and isinstance(servers[0], dict):
+        server_url = servers[0].get("url", "")
+        for var, meta in (servers[0].get("variables") or {}).items():
+            server_url = server_url.replace("{" + var + "}", str((meta or {}).get("default", "")))
+        return urljoin(spec_url, server_url) if server_url else ""
+    host = spec.get("host")
+    if host:
+        schemes = spec.get("schemes") or ["https"]
+        scheme = "https" if "https" in schemes else schemes[0]
+        return f"{scheme}://{host}{spec.get('basePath', '')}".rstrip("/")
+    return ""
+
+
+MAX_SCHEMA_DEPTH = 5
+
+
+def resolve_schema(spec, schema, depth=0, seen=()):
+    """Return a self-contained copy of a JSON schema with every $ref inlined.
+
+    Circular references and anything nested deeper than MAX_SCHEMA_DEPTH are
+    replaced by a short stub so the result stays finite and reasonably small.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    if "$ref" in schema:
+        ref = schema["$ref"]
+        if not isinstance(ref, str) or ref in seen or depth >= MAX_SCHEMA_DEPTH:
+            name = ref.rsplit("/", 1)[-1] if isinstance(ref, str) else "?"
+            return {"type": "object", "description": f"(reference to {name} not expanded)"}
+        return resolve_schema(spec, resolve_ref(spec, schema), depth + 1, seen + (ref,))
+    if depth >= MAX_SCHEMA_DEPTH:
+        return {"type": schema.get("type", "object")}
+
+    out = {}
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, dict):
+            out[key] = {n: resolve_schema(spec, s, depth + 1, seen) for n, s in value.items()}
+        elif key in ("items", "additionalProperties", "not") and isinstance(value, dict):
+            out[key] = resolve_schema(spec, value, depth + 1, seen)
+        elif key in ("allOf", "oneOf", "anyOf") and isinstance(value, list):
+            out[key] = [resolve_schema(spec, s, depth + 1, seen) for s in value]
+        else:
+            out[key] = value
+    return out
+
+
+def _pick_content(content):
+    """Prefer a JSON media type; otherwise take the first one declared."""
+    if not isinstance(content, dict) or not content:
+        return "", {}
+    for ct, media in content.items():
+        if "json" in ct:
+            return ct, media or {}
+    ct, media = next(iter(content.items()))
+    return ct, media or {}
+
+
+def extract_request_body(spec, operation, raw_params):
+    """Request body of an operation as {required, contentType, schema}, or {} if it has none.
+
+    Handles OpenAPI 3 `requestBody` and Swagger 2 `in: body` parameters.
+    """
+    body = resolve_ref(spec, operation.get("requestBody") or {})
+    if body:
+        content_type, media = _pick_content(body.get("content"))
+        return {
+            "required": bool(body.get("required", False)),
+            "contentType": content_type,
+            "schema": resolve_schema(spec, media.get("schema") or {}),
+        }
+    for param_obj in raw_params:
+        if param_obj.get("in") == "body":
+            return {
+                "required": bool(param_obj.get("required", False)),
+                "contentType": "application/json",
+                "schema": resolve_schema(spec, param_obj.get("schema") or {}),
+            }
+    return {}
+
+
+def extract_success_response(spec, operation):
+    """The first 2xx response (else `default`) as {status, description, contentType, schema}, or {}."""
+    responses = {str(k): v for k, v in (operation.get("responses") or {}).items()}  # YAML may give int keys
+    codes = sorted(c for c in responses if c.startswith("2"))
+    code = codes[0] if codes else ("default" if "default" in responses else None)
+    if code is None:
+        return {}
+    resp = resolve_ref(spec, responses[code])
+    content_type, media = _pick_content(resp.get("content"))
+    schema = media.get("schema") or resp.get("schema") or {}  # `schema` directly on the response = Swagger 2
+    return {
+        "status": code,
+        "description": resp.get("description", ""),
+        "contentType": content_type,
+        "schema": resolve_schema(spec, schema),
+    }
+
+
+def _schema_type(schema):
+    t = schema.get("type", "string") if isinstance(schema, dict) else "string"
+    if isinstance(t, list):  # OpenAPI 3.1 allows ["string", "null"]
+        t = next((x for x in t if x != "null"), "string")
+    return str(t)[:50]
+
+
+def body_parameters(request_body):
+    """Flatten the top-level fields of the request body into parameter dicts (location="body")."""
+    schema = (request_body or {}).get("schema") or {}
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        if not schema:
+            return []
+        # Non-object body (array, primitive, oneOf...) -> one parameter for the whole body.
+        return [{
+            "name": "body",
+            "location": "body",
+            "type": _schema_type(schema),
+            "required": bool(request_body.get("required", False)),
+            "description": schema.get("description", ""),
+            "exampleValue": "",
+            "enum": [],
+        }]
+    required = set(schema.get("required") or [])
+    result = []
+    for name, prop in properties.items():
+        prop = prop if isinstance(prop, dict) else {}
+        example = prop.get("example", prop.get("default", ""))
+        result.append({
+            "name": name,
+            "location": "body",
+            "type": _schema_type(prop),
+            "required": name in required,
+            "description": prop.get("description", ""),
+            "exampleValue": "" if example is None else str(example),
+            "enum": prop.get("enum", []),
+        })
+    return result
+
+
 def discover_apis(swagger_urls, auth_config=None):
     """Fetch + parse one or more OpenAPI specs into the app.md discovery shape.
 
@@ -301,7 +474,7 @@ def discover_apis(swagger_urls, auth_config=None):
     unique, stable, sequential string ids ("1", "2", ...).
     """
     headers = build_auth_headers(auth_config)
-    meta = {"specVersion": "", "baseUrl": ""}
+    meta = {"specVersion": "", "baseUrl": "", "specs": {}}  # specs: per-URL info.title/version/openapi version
     apis = []
     next_id = 1
 
@@ -315,6 +488,15 @@ def discover_apis(swagger_urls, auth_config=None):
         except Exception as e:
             raise ValueError(f"Failed to download or parse OpenAPI spec from {url}: {e}")
 
+        info = spec.get("info") or {}
+        meta["specs"][url] = {
+            "title": info.get("title", ""),
+            "description": info.get("description", ""),
+            "version": str(info.get("version", "")),
+            "openapiVersion": str(spec.get("openapi") or spec.get("swagger") or ""),
+            "baseUrl": compute_base_url(spec, url),
+        }
+
         if not meta["specVersion"]:
             openapi_ver = spec.get("openapi")
             swagger_ver = spec.get("swagger")
@@ -322,8 +504,7 @@ def discover_apis(swagger_urls, auth_config=None):
                 meta["specVersion"] = f"OpenAPI {openapi_ver}"
             elif swagger_ver:
                 meta["specVersion"] = f"Swagger {swagger_ver}"
-            servers = spec.get("servers", [])
-            meta["baseUrl"] = servers[0].get("url", "") if servers else ""
+            meta["baseUrl"] = meta["specs"][url]["baseUrl"]
 
         for path, path_item in (spec.get("paths") or {}).items():
             for method, operation in (path_item or {}).items():
@@ -331,11 +512,16 @@ def discover_apis(swagger_urls, auth_config=None):
                     continue
 
                 parameters = []
-                for param_obj in operation.get("parameters", []):
-                    schema = param_obj.get("schema", {}) or {}
+                raw_params = collect_parameters(spec, path_item, operation)
+                request_body = extract_request_body(spec, operation, raw_params)
+                for param_obj in raw_params:
+                    if param_obj.get("in") == "body":  # Swagger 2 body -> handled as request_body
+                        continue
+                    schema = resolve_ref(spec, param_obj.get("schema", {}) or {})
                     example = param_obj.get("example", schema.get("example", schema.get("default", "")))
                     parameters.append({
                         "name": param_obj.get("name", ""),
+                        "location": param_obj.get("in", "query"),
                         "type": schema.get("type", "string"),
                         "required": bool(param_obj.get("required", False)),
                         "description": param_obj.get("description", ""),
@@ -352,6 +538,10 @@ def discover_apis(swagger_urls, auth_config=None):
                     "tag": tags[0],
                     "suggestedToolName": operation.get("operationId") or generate_camel_tool_name(method, path),
                     "parameters": parameters,
+                    # Internal (underscore) keys: persisted by generate_mcp_server, stripped from analyze-spec output.
+                    "_swaggerUrl": url,
+                    "_requestBody": request_body,
+                    "_responseSchema": extract_success_response(spec, operation),
                 })
                 next_id += 1
 
@@ -378,6 +568,7 @@ def analyze_spec(request):
     except ValueError as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
+    apis = [{k: v for k, v in api.items() if not k.startswith("_")} for api in apis]
     tag_groups = sorted({api["tag"] for api in apis})
 
     return Response(
@@ -414,7 +605,7 @@ def generate_mcp_server(request):
     # details for the selected APIs (the client only echoes back id/endpoint/
     # method/toolName, not the full discovered payload).
     try:
-        _, discovered_apis = discover_apis(application["swaggerUrls"], application.get("authConfig"))
+        meta, discovered_apis = discover_apis(application["swaggerUrls"], application.get("authConfig"))
     except ValueError as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
 
@@ -440,6 +631,7 @@ def generate_mcp_server(request):
             "name": application["name"],
             "description": application.get("description", ""),
             "openapi_url": application["swaggerUrls"][0],
+            "base_url": meta["baseUrl"],
             "car_id": application.get("carId", ""),
             "owner": application.get("owner", ""),
             "owner_email": application.get("ownerEmail", ""),
@@ -456,11 +648,25 @@ def generate_mcp_server(request):
             "mcp_health_status": "Healthy",
         },
     )
+    # One Api row per swagger URL, keyed by (project, spec_url). Named after the spec's
+    # info.title; the URL is only appended if two specs in this project share a title
+    # (name is unique per project).
+    api_by_url = {}
     for swagger_url in application["swaggerUrls"]:
-        Api.objects.get_or_create(
+        spec_info = meta["specs"].get(swagger_url, {})
+        title = (spec_info.get("title") or application["name"])[:300]
+        if Api.objects.filter(project=project, name=title).exclude(spec_url=swagger_url).exists():
+            title = f"{title} ({swagger_url})"[:300]
+        api_by_url[swagger_url], _ = Api.objects.update_or_create(
             project=project,
-            name=f"{application['name']} ({swagger_url})"[:300],
-            defaults={"description": application.get("description", ""), "base_url": swagger_url},
+            spec_url=swagger_url,
+            defaults={
+                "name": title,
+                "base_url": spec_info.get("baseUrl", ""),
+                "description": spec_info.get("description") or application.get("description", ""),
+                "version": spec_info.get("version", "")[:50],
+                "openapi_version": spec_info.get("openapiVersion", "")[:50],
+            },
         )
 
     created_tools = []
@@ -470,7 +676,7 @@ def generate_mcp_server(request):
             project=project,
             name=tool_name,
             defaults={
-                "api": project.apis.first(),
+                "api": api_by_url[discovered["_swaggerUrl"]],
                 "display_name": discovered["summary"] or tool_name,
                 "description": discovered["description"],
                 "http_method": discovered["method"],
@@ -478,20 +684,26 @@ def generate_mcp_server(request):
                 "operation_id": tool_name,
                 "summary": discovered["summary"],
                 "tags": [discovered["tag"]] if discovered["tag"] else [],
+                "request_schema": discovered.get("_requestBody") or {},
+                "response_schema": discovered.get("_responseSchema") or {},
                 "required_permission": f"MCP_{tool_name.upper()}",
                 "status": "active",
             },
         )
         tool.parameters.all().delete()
-        for param in discovered["parameters"]:
-            ToolParameter.objects.create(
+        all_params = discovered["parameters"] + body_parameters(discovered.get("_requestBody"))
+        for param in all_params:
+            ToolParameter.objects.update_or_create(
                 tool=tool,
-                name=param["name"],
-                location="path" if f"{{{param['name']}}}" in discovered["endpoint"] else "query",
-                data_type=param["type"],
-                required=param["required"],
-                description=param["description"],
-                default_value=param["exampleValue"],
+                name=param["name"][:200],
+                location=param.get("location") or ("path" if f"{{{param['name']}}}" in discovered["endpoint"] else "query"),
+                defaults=dict(
+                    data_type=param["type"],
+                    required=param["required"],
+                    description=param["description"],
+                    default_value=param["exampleValue"][:500],
+                    enum_values=param.get("enum", []),
+                ),
             )
         created_tools.append(tool)
 

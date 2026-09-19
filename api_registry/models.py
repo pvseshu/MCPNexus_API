@@ -11,6 +11,9 @@ class Api(models.Model):
     description = models.TextField(blank=True)
     version = models.CharField(max_length=50, blank=True)
     openapi_version = models.CharField(max_length=50, blank=True)
+    # URL the OpenAPI/Swagger spec was downloaded from.
+    spec_url = models.URLField(max_length=1000, blank=True)
+    # Server the endpoints are called on (from the spec's servers / host+basePath).
     base_url = models.URLField(max_length=1000, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
