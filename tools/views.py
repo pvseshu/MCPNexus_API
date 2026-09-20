@@ -323,6 +323,73 @@ def execute_result(**overrides):
     return result
 
 
+def call_tool(tool, values):
+    """Calls the tool's real backend API once with `values` and returns the execute_result dict.
+
+    Raises ValueError if `values` do not fit the tool's parameters. Upstream failures are not raised:
+    they come back as success=False. Shared by the Run Test endpoint and the chat pipeline.
+    """
+    url, query, headers, cookies, body = build_tool_request(tool, values)  # raises ValueError on bad input
+
+    # Spotify override: use the bearer token from .env instead of calling the token API.
+    if "spotify" in tool.project.name.lower() and settings.SPOTIFY_BEARER_TOKEN:
+        token = settings.SPOTIFY_BEARER_TOKEN
+    else:
+        try:
+            token = fetch_token(tool.project.auth_config)
+        except TokenError as e:
+            return execute_result(error=f"Could not get an access token: {e}")
+    if token:
+        headers = {"Authorization": f"Bearer {token}", **headers}
+
+    method = tool.http_method
+    with httpx.Client(timeout=UPSTREAM_TIMEOUT, follow_redirects=False) as client:
+        upstream_request = client.build_request(
+            method,
+            url,
+            params=query or None,
+            headers=headers,
+            cookies=cookies or None,
+            json=body if body else None,
+        )
+        shown = {"method": method, "url": str(upstream_request.url)}
+        started = time.monotonic()
+        try:
+            upstream = client.send(upstream_request, stream=True)
+            try:
+                text, truncated = read_limited(upstream)
+                http_status = upstream.status_code
+            finally:
+                upstream.close()
+        except httpx.TimeoutException:
+            return execute_result(request=shown, error=f"Timed out after {int(UPSTREAM_TIMEOUT)}s")
+        except httpx.HTTPError:
+            return execute_result(request=shown, error="Could not reach the upstream API")
+        duration_ms = int((time.monotonic() - started) * 1000)
+
+    parsed = text
+    if text and not truncated:
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            pass
+
+    ok = 200 <= http_status < 300
+    error = None
+    if not ok:
+        error = f"Upstream returned {http_status}"
+    elif truncated:
+        error = "Response was larger than 1 MB and was truncated"
+    return execute_result(
+        success=ok,
+        httpStatus=http_status,
+        durationMs=duration_ms,
+        request=shown,
+        response=parsed if text else None,
+        error=error,
+    )
+
+
 @extend_schema(request=ExecuteToolRequestSerializer, responses={200: ExecuteToolResponseSerializer})
 @api_view(["POST"])
 def execute_mcp_tool(request, tool_id):
@@ -348,66 +415,6 @@ def execute_mcp_tool(request, tool_id):
         return Response({"error": "Tool is not active."}, status=status.HTTP_409_CONFLICT)
 
     try:
-        url, query, headers, cookies, body = build_tool_request(tool, values)
+        return Response(call_tool(tool, values))
     except ValueError as e:
         return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
-
-    # Spotify override: use the bearer token from .env instead of calling the token API.
-    if "spotify" in tool.project.name.lower() and settings.SPOTIFY_BEARER_TOKEN:
-        token = settings.SPOTIFY_BEARER_TOKEN
-    else:
-        try:
-            token = fetch_token(tool.project.auth_config)
-        except TokenError as e:
-            return Response(execute_result(error=f"Could not get an access token: {e}"))
-    if token:
-        headers = {"Authorization": f"Bearer {token}", **headers}
-
-    method = tool.http_method
-    with httpx.Client(timeout=UPSTREAM_TIMEOUT, follow_redirects=False) as client:
-        upstream_request = client.build_request(
-            method,
-            url,
-            params=query or None,
-            headers=headers,
-            cookies=cookies or None,
-            json=body if body else None,
-        )
-        shown = {"method": method, "url": str(upstream_request.url)}
-        started = time.monotonic()
-        try:
-            upstream = client.send(upstream_request, stream=True)
-            try:
-                text, truncated = read_limited(upstream)
-                http_status = upstream.status_code
-            finally:
-                upstream.close()
-        except httpx.TimeoutException:
-            return Response(execute_result(request=shown, error=f"Timed out after {int(UPSTREAM_TIMEOUT)}s"))
-        except httpx.HTTPError:
-            return Response(execute_result(request=shown, error="Could not reach the upstream API"))
-        duration_ms = int((time.monotonic() - started) * 1000)
-
-    parsed = text
-    if text and not truncated:
-        try:
-            parsed = json.loads(text)
-        except ValueError:
-            pass
-
-    ok = 200 <= http_status < 300
-    error = None
-    if not ok:
-        error = f"Upstream returned {http_status}"
-    elif truncated:
-        error = "Response was larger than 1 MB and was truncated"
-    return Response(
-        execute_result(
-            success=ok,
-            httpStatus=http_status,
-            durationMs=duration_ms,
-            request=shown,
-            response=parsed if text else None,
-            error=error,
-        )
-    )

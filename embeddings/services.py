@@ -283,12 +283,12 @@ def reindex_project(project):
     return True
 
 
-def search_tools(query, project_id, limit=None):
+def search_tools(query, project_id, limit=None, threshold=None):
     """Find the tools of ONE project whose meaning is closest to `query`.
 
     Embeds the question, then asks Qdrant for the nearest tool vectors, filtered
     to `project_id` so a chat for one application never sees another's tools.
-    Only matches scoring at least TOOL_MATCH_THRESHOLD are kept. Returns a list
+    Only matches scoring at least `threshold` (default TOOL_MATCH_THRESHOLD) are kept. Returns a list
     of {"tool_id", "name", "score"} (best first), or None if Ollama/Qdrant is
     unavailable - callers treat None as "search not possible", [] as "no match".
     """
@@ -310,7 +310,7 @@ def search_tools(query, project_id, limit=None):
             query=vectors[0],
             query_filter=Filter(must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]),
             limit=limit or settings.TOOL_CANDIDATE_COUNT,
-            score_threshold=settings.TOOL_MATCH_THRESHOLD,
+            score_threshold=settings.TOOL_MATCH_THRESHOLD if threshold is None else threshold,
         ).points
     except Exception as e:
         logger.warning("Qdrant tool search failed (%s).", e)

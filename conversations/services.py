@@ -13,11 +13,14 @@ import httpx
 from django.conf import settings
 
 from embeddings.services import search_tools
-from tools.models import Tool
+from .llm import ToolSelector
+from .repository import ToolRepository
+from .tool_executor import ToolExecutor
 
 logger = logging.getLogger(__name__)
 
 RELEVANCE_TIMEOUT_SECONDS = 60
+RETRY_THRESHOLD_STEP = 0.05
 
 
 def _join(items):
@@ -84,6 +87,36 @@ def check_relevance(project, message):
         return None
 
 
+def no_match_reply(project, message):
+    """Ask Llama for a short generic reply saying nothing in the application matched, so the user rephrases."""
+    system = (
+        f"You are the assistant for the {project.name} application. The user's message could not be matched "
+        f"to anything the {project.name} application can do. Reply in 1-2 short, friendly sentences: say you "
+        f"were unable to find {project.name}-related information for their prompt, and ask them to refine "
+        "their request and try again. Do not invent any information. Reply with plain text only."
+    )
+    fallback = (
+        f"I was unable to find {project.name} related information for your prompt. "
+        "Please refine your request and try again."
+    )
+    try:
+        resp = httpx.post(
+            f"{settings.OLLAMA_URL.rstrip('/')}/api/chat",
+            json={
+                "model": settings.OLLAMA_CHAT_MODEL,
+                "stream": False,
+                "options": {"temperature": 0.4},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": message}],
+            },
+            timeout=RELEVANCE_TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        return resp.json()["message"]["content"].strip() or fallback
+    except Exception as e:
+        logger.warning("[chat] no-match reply failed (%s).", e)
+        return fallback
+
+
 def answer(project, message):
     """Return the reply text for `message`, scoped to `project`."""
     logger.info(
@@ -99,18 +132,33 @@ def answer(project, message):
     logger.info("[chat] application description=%r ai_context=%s", project.description, project.ai_context)
 
     matches = search_tools(message, project.id)
+    if matches == []:
+        # One retry with a slightly lower bar before giving up.
+        lower = round(settings.TOOL_MATCH_THRESHOLD - RETRY_THRESHOLD_STEP, 4)
+        logger.info("[chat] no tool matched at %s - retrying once at %s.", settings.TOOL_MATCH_THRESHOLD, lower)
+        matches = search_tools(message, project.id, threshold=lower)
+
     if matches is None:
         logger.warning("[chat] Qdrant/Ollama unavailable - could not search tools.")
     elif not matches:
         logger.info("[chat] no tool matched (project has %d active tools).", project.tools.filter(status="active").count())
+        return no_match_reply(project, message)
     else:
-        by_id = Tool.objects.in_bulk([m["tool_id"] for m in matches])
         for m in matches:
-            tool = by_id.get(m["tool_id"])
-            logger.info(
-                "[chat] match: score=%.3f tool_id=%s name=%s endpoint=%s status=%s",
-                m["score"], m["tool_id"], m["name"],
-                tool.endpoint if tool else "?", tool.status if tool else "missing in Postgres",
-            )
+            logger.info("[chat] match: score=%.3f tool_id=%s name=%s", m["score"], m["tool_id"], m["name"])
+        tools = ToolRepository.get_matched_tool_details(project, matches)
+        for t in tools:
+            logger.info("[chat] tool details from Postgres: %s", json.dumps(t, indent=2, default=str))
+
+        selection = ToolSelector.select_tool(project, message, tools)
+        logger.info("[chat] tool selection (GPT-5.2): %s", json.dumps(selection, indent=2, default=str))
+        if selection is None:
+            return "Sorry, I couldn't work out which action to use right now. Please try again."
+        if not selection["is_find_tool"]:
+            return no_match_reply(project, message)
+
+        # Step 5: call the selected tool's real API.
+        for item in selection["tool_array"]:
+            logger.info("[chat] step 5 - tool_call_result: %s", json.dumps(ToolExecutor.call(project, item), indent=2, default=str))
 
     return "Received your message. (Step 1: application and tool matching logged on the server.)"

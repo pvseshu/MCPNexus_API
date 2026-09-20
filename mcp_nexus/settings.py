@@ -138,6 +138,12 @@ EMBEDDING_DIM = int(env("EMBEDDING_DIM", "1024"))
 # --- Chat (served locally via Ollama) ---
 OLLAMA_CHAT_MODEL = env("OLLAMA_CHAT_MODEL", "llama3.1:8b-instruct-q4_k_m")
 
+# --- OpenAI (GPT-5.2), used by the chat tool selection ---
+OPENAI_API_KEY = env("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = env("OPENAI_BASE_URL", "https://api.openai.com/v1")
+OPENAI_MODEL = env("OPENAI_MODEL", "gpt-5.2")
+OPENAI_REASONING_EFFORT = env("OPENAI_REASONING_EFFORT", "low")  # none / low / medium / high
+
 # --- Azure OpenAI (GPT-5.2) --------------------------------------------
 AZURE_OPENAI_ENDPOINT = env("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_KEY = env("AZURE_OPENAI_API_KEY", "")
