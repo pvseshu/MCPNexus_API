@@ -7,7 +7,7 @@ import yaml
 import httpx
 from django.conf import settings
 from django.db import transaction
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import status
 from rest_framework.decorators import api_view
@@ -28,6 +28,7 @@ from .serializers import (
     GenerateMcpServerRequestSerializer,
     GenerateMcpServerResponseSerializer,
     NavigationCountsSerializer,
+    DashboardSummarySerializer,
     ListMcpServersResponseSerializer,
     McpServerDetailResponseSerializer,
     UpdateMcpServerRequestSerializer,
@@ -553,6 +554,69 @@ def analyze_spec(request):
     )
 
 
+def save_unselected_as_disabled_tools(project, api_by_url, discovered_apis, resolved):
+    """Store every discovered endpoint that was not selected as a disabled tool.
+
+    The API Discovery page lists all of an application's endpoints; enabling one later just
+    flips its status. Endpoints already saved (same method + path) are left untouched so a
+    re-generate never disables something that was enabled since.
+    """
+    selected_ids = {discovered["id"] for _sel, discovered in resolved}
+    existing = Tool.objects.filter(project=project).values_list("name", "http_method", "path")
+    used_names = {name for name, _m, _p in existing}
+    saved_endpoints = {(method, path) for _n, method, path in existing}
+
+    tools, params_by_index = [], []
+    for discovered in discovered_apis:
+        if discovered["id"] in selected_ids or (discovered["method"], discovered["endpoint"]) in saved_endpoints:
+            continue
+        base = discovered["suggestedToolName"][:290]
+        name, n = base, 2
+        while name in used_names:
+            name, n = f"{base}_{n}", n + 1
+        used_names.add(name)
+        tools.append(Tool(
+            project=project,
+            api=api_by_url[discovered["_swaggerUrl"]],
+            name=name,
+            display_name=(discovered["summary"] or name)[:300],
+            description=discovered["description"],
+            http_method=discovered["method"],
+            path=discovered["endpoint"],
+            operation_id=name,
+            summary=discovered["summary"],
+            tags=[discovered["tag"]] if discovered["tag"] else [],
+            request_schema=discovered.get("_requestBody") or {},
+            response_schema=discovered.get("_responseSchema") or {},
+            required_permission=f"MCP_{name.upper()}"[:200],
+            status="disabled",
+        ))
+        params_by_index.append(discovered["parameters"] + body_parameters(discovered.get("_requestBody")))
+
+    # bulk_create returns primary keys on PostgreSQL, which the parameter rows need.
+    Tool.objects.bulk_create(tools, batch_size=500)
+    rows = []
+    for tool, params in zip(tools, params_by_index):
+        seen = set()
+        for param in params:
+            location = param.get("location") or ("path" if f"{{{param['name']}}}" in tool.path else "query")
+            key = (param["name"][:200], location)
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(ToolParameter(
+                tool=tool,
+                name=key[0],
+                location=location,
+                data_type=param["type"],
+                required=param["required"],
+                description=param["description"],
+                default_value=param["exampleValue"][:500],
+                enum_values=param.get("enum", []),
+            ))
+    ToolParameter.objects.bulk_create(rows, batch_size=1000)
+
+
 @extend_schema(
     request=GenerateMcpServerRequestSerializer,
     responses={201: GenerateMcpServerResponseSerializer},
@@ -678,6 +742,9 @@ def generate_mcp_server(request):
             )
         created_tools.append(tool)
 
+    save_unselected_as_disabled_tools(project, api_by_url, discovered_apis, resolved)
+
+    # Only enabled tools are searchable; disabled ones get indexed when someone enables them.
     index_application(project, created_tools)
 
     return Response(
@@ -727,8 +794,54 @@ def navigation_counts(request):
     return Response(
         {
             "mcpServers": Project.objects.count(),
-            "mcpTools": Tool.objects.count(),
+            # MCP tools are the enabled ones; disabled rows are discovered-but-not-enabled endpoints.
+            "mcpTools": Tool.objects.filter(status="active").count(),
+            # API Discovery lists every stored endpoint, enabled or not.
+            "apiDiscovery": Tool.objects.count(),
+            "mcpCatalog": Project.objects.filter(is_published_to_catalog=True).count(),
             "pendingAccessRequests": AccessRequest.objects.filter(status="pending").count(),
+        }
+    )
+
+
+@extend_schema(responses={200: DashboardSummarySerializer})
+@api_view(["GET"])
+def dashboard_summary(request):
+    """
+    GET /api/dashboard
+    Everything the Dashboard needs in one call, COUNT / GROUP BY queries only.
+    """
+    total_projects = Project.objects.count()
+    ai_ready = Project.objects.filter(is_ai_ready=True).count()
+    # order_by() clears Project's default name ordering, which would otherwise split the GROUP BY.
+    health = {
+        row["mcp_health_status"]: row["n"]
+        for row in Project.objects.order_by().values("mcp_health_status").annotate(n=Count("id"))
+    }
+    healthy = health.get("Healthy", 0)
+    degraded = health.get("Degraded", 0)
+    # Same rule as the server cards: any state other than Healthy/Degraded shows as Offline.
+    offline = total_projects - healthy - degraded
+
+    active_tools = Tool.objects.filter(status="active").count()
+
+    return Response(
+        {
+            "applications": {"total": total_projects, "aiReady": ai_ready},
+            "mcpServers": {
+                "total": total_projects,
+                "healthy": healthy,
+                "degraded": degraded,
+                "offline": offline,
+            },
+            "mcpTools": {
+                "total": active_tools,
+                "active": active_tools,
+            },
+            "pendingAccessRequests": AccessRequest.objects.filter(status="pending").count(),
+            # Knowledge sources and audit events have no tables yet.
+            "knowledge": {"sources": 0, "indexedDocuments": 0},
+            "recentActivity": [],
         }
     )
 
@@ -924,7 +1037,7 @@ def list_mcp_servers(request):
     GET /api/mcp-servers
     Every registered MCP server with its application info and tool count.
     """
-    projects = Project.objects.annotate(tools_count=Count("tools"))
+    projects = Project.objects.annotate(tools_count=Count("tools", filter=Q(tools__status="active")))
     return Response({"servers": [server_summary(p) for p in projects]})
 
 
@@ -933,7 +1046,7 @@ def get_project_by_server_id(server_id):
     match = re.fullmatch(r"mcp-(\d+)", server_id)
     if not match:
         return None
-    return Project.objects.annotate(tools_count=Count("tools")).filter(id=int(match.group(1))).first()
+    return Project.objects.annotate(tools_count=Count("tools", filter=Q(tools__status="active"))).filter(id=int(match.group(1))).first()
 
 
 @extend_schema(

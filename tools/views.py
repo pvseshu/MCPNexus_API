@@ -89,7 +89,8 @@ def list_mcp_tools(request):
     GET /api/mcp-tools[?serverId=mcp-1]
     Every MCP tool with its server / application info.
     """
-    tools = Tool.objects.select_related("project")
+    # Disabled rows are discovered-but-not-enabled endpoints; they only show on API Discovery.
+    tools = Tool.objects.select_related("project").filter(status="active")
     server_id = request.query_params.get("serverId")
     if server_id:
         match = re.fullmatch(r"mcp-(\d+)", server_id)

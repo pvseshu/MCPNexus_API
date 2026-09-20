@@ -2,7 +2,7 @@ from django.contrib import admin
 from django.http import JsonResponse
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
-from projects.views import onboard_project, analyze_spec, generate_mcp_server, navigation_counts, list_mcp_servers, mcp_server_detail, set_catalog_visibility
+from projects.views import onboard_project, analyze_spec, generate_mcp_server, navigation_counts, dashboard_summary, list_mcp_servers, mcp_server_detail, set_catalog_visibility
 from tools.views import project_tools, list_mcp_tools, execute_mcp_tool
 
 
@@ -23,6 +23,7 @@ urlpatterns = [
     path("api/mcp-tools", list_mcp_tools, name="list_mcp_tools"),
     path("api/mcp-tools/<str:tool_id>/execute", execute_mcp_tool, name="execute_mcp_tool"),
     path("api/navigation/counts", navigation_counts, name="navigation_counts"),
+    path("api/dashboard", dashboard_summary, name="dashboard_summary"),
     # Swagger / OpenAPI docs
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),

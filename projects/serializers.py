@@ -183,7 +183,50 @@ class GenerateMcpServerResponseSerializer(serializers.Serializer):
 class NavigationCountsSerializer(serializers.Serializer):
     mcpServers = serializers.IntegerField()
     mcpTools = serializers.IntegerField()
+    apiDiscovery = serializers.IntegerField()
+    mcpCatalog = serializers.IntegerField()
     pendingAccessRequests = serializers.IntegerField()
+
+
+class DashboardApplicationsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    aiReady = serializers.IntegerField()
+
+
+class DashboardMcpServersSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    healthy = serializers.IntegerField()
+    degraded = serializers.IntegerField()
+    offline = serializers.IntegerField()
+
+
+class DashboardMcpToolsSerializer(serializers.Serializer):
+    total = serializers.IntegerField()
+    active = serializers.IntegerField()
+
+
+class DashboardKnowledgeSerializer(serializers.Serializer):
+    sources = serializers.IntegerField()
+    indexedDocuments = serializers.IntegerField()
+
+
+class DashboardActivitySerializer(serializers.Serializer):
+    id = serializers.CharField()
+    timestamp = serializers.DateTimeField()
+    action = serializers.CharField()
+    actor = serializers.CharField()
+    mcpServer = serializers.CharField()
+    details = serializers.CharField()
+    status = serializers.CharField()
+
+
+class DashboardSummarySerializer(serializers.Serializer):
+    applications = DashboardApplicationsSerializer()
+    mcpServers = DashboardMcpServersSerializer()
+    mcpTools = DashboardMcpToolsSerializer()
+    pendingAccessRequests = serializers.IntegerField()
+    knowledge = DashboardKnowledgeSerializer()
+    recentActivity = DashboardActivitySerializer(many=True)
 
 
 class McpServerApplicationSerializer(serializers.Serializer):
