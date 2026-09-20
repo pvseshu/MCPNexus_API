@@ -281,3 +281,38 @@ def reindex_project(project):
     )
     logger.info("Re-indexed project %s into Qdrant.", project.id)
     return True
+
+
+def search_tools(query, project_id, limit=None):
+    """Find the tools of ONE project whose meaning is closest to `query`.
+
+    Embeds the question, then asks Qdrant for the nearest tool vectors, filtered
+    to `project_id` so a chat for one application never sees another's tools.
+    Only matches scoring at least TOOL_MATCH_THRESHOLD are kept. Returns a list
+    of {"tool_id", "name", "score"} (best first), or None if Ollama/Qdrant is
+    unavailable - callers treat None as "search not possible", [] as "no match".
+    """
+    client = _get_qdrant_client()
+    if client is None:
+        return None
+
+    from qdrant_client.models import FieldCondition, Filter, MatchValue
+
+    vectors = _embed([query])
+    if vectors is None:
+        return None
+
+    try:
+        if not client.collection_exists(settings.QDRANT_TOOLS_COLLECTION):
+            return []
+        hits = client.query_points(
+            collection_name=settings.QDRANT_TOOLS_COLLECTION,
+            query=vectors[0],
+            query_filter=Filter(must=[FieldCondition(key="project_id", match=MatchValue(value=project_id))]),
+            limit=limit or settings.TOOL_CANDIDATE_COUNT,
+            score_threshold=settings.TOOL_MATCH_THRESHOLD,
+        ).points
+    except Exception as e:
+        logger.warning("Qdrant tool search failed (%s).", e)
+        return None
+    return [{"tool_id": h.payload["tool_id"], "name": h.payload["name"], "score": h.score} for h in hits]

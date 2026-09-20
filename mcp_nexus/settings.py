@@ -135,6 +135,9 @@ OLLAMA_URL = env("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_EMBEDDING_MODEL = env("OLLAMA_EMBEDDING_MODEL", "bge-large")
 EMBEDDING_DIM = int(env("EMBEDDING_DIM", "1024"))
 
+# --- Chat (served locally via Ollama) ---
+OLLAMA_CHAT_MODEL = env("OLLAMA_CHAT_MODEL", "llama3.1:8b-instruct-q4_k_m")
+
 # --- Azure OpenAI (GPT-5.2) --------------------------------------------
 AZURE_OPENAI_ENDPOINT = env("AZURE_OPENAI_ENDPOINT", "")
 AZURE_OPENAI_API_KEY = env("AZURE_OPENAI_API_KEY", "")

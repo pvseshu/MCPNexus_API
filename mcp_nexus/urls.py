@@ -3,6 +3,7 @@ from django.http import JsonResponse
 from django.urls import include, path
 from drf_spectacular.views import SpectacularAPIView, SpectacularSwaggerView, SpectacularRedocView
 from projects.views import onboard_project, analyze_spec, generate_mcp_server, navigation_counts, dashboard_summary, list_mcp_servers, mcp_server_detail, set_catalog_visibility
+from conversations.views import send_chat_message
 from tools.views import project_tools, list_mcp_tools, list_discovered_endpoints, mcp_tool_detail, execute_mcp_tool
 
 
@@ -24,6 +25,7 @@ urlpatterns = [
     path("api/mcp-tools/<str:tool_id>", mcp_tool_detail, name="mcp_tool_detail"),
     path("api/mcp-tools/<str:tool_id>/execute", execute_mcp_tool, name="execute_mcp_tool"),
     path("api/api-discovery", list_discovered_endpoints, name="list_discovered_endpoints"),
+    path("api/chat/send", send_chat_message, name="send_chat_message"),
     path("api/navigation/counts", navigation_counts, name="navigation_counts"),
     path("api/dashboard", dashboard_summary, name="dashboard_summary"),
     # Swagger / OpenAPI docs
