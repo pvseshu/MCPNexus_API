@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 import httpx
 from django.conf import settings
+from django.db.models import Count
 from rest_framework.decorators import api_view
 from rest_framework.response import Response
 from rest_framework import status
@@ -16,6 +17,7 @@ from .models import Tool
 from .serializers import (
     ExecuteToolRequestSerializer,
     ExecuteToolResponseSerializer,
+    ListDiscoveredEndpointsResponseSerializer,
     ListMcpToolsResponseSerializer,
     ToolDetailResponseSerializer,
     ToolDetailSerializer,
@@ -111,7 +113,43 @@ def list_mcp_tools(request):
     return Response({"tools": [tool_card(t) for t in tools]})
 
 
-FIXED_TOOL_FIELDS = ["name", "displayName", "sourceEndpoint", "httpMethod", "serverId"]
+@extend_schema(responses={200: ListDiscoveredEndpointsResponseSerializer})
+@api_view(["GET"])
+def list_discovered_endpoints(request):
+    """
+    GET /api/api-discovery
+    Every stored endpoint, enabled or not, for the API Discovery page.
+    """
+    tools = (
+        Tool.objects.select_related("project")
+        .annotate(parameters_count=Count("parameters"))
+        .order_by("project__name", "path", "http_method")
+    )
+    return Response(
+        {
+            "endpoints": [
+                {
+                    "id": f"tool-{tool.id}",
+                    "endpoint": tool.path,
+                    "method": tool.http_method,
+                    "summary": tool.summary,
+                    "description": tool.description,
+                    "tag": tool.tags[0] if tool.tags else "",
+                    "suggestedToolName": tool.name,
+                    "enabledForMcp": tool.status == "active",
+                    "parametersCount": tool.parameters_count,
+                    "applicationId": str(tool.project_id),
+                    "applicationName": tool.project.name,
+                    "serverId": f"mcp-{tool.project_id}",
+                    "serverName": f"{tool.project.name} MCP",
+                }
+                for tool in tools
+            ]
+        }
+    )
+
+
+FIXED_TOOL_FIELDS =["name", "displayName", "sourceEndpoint", "httpMethod", "serverId"]
 
 
 def get_tool_by_id(tool_id):

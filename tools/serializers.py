@@ -49,6 +49,26 @@ class ListMcpToolsResponseSerializer(serializers.Serializer):
     tools = McpToolCardSerializer(many=True)
 
 
+class DiscoveredEndpointSerializer(serializers.Serializer):
+    id = serializers.CharField()
+    endpoint = serializers.CharField()
+    method = serializers.CharField()
+    summary = serializers.CharField(allow_blank=True)
+    description = serializers.CharField(allow_blank=True)
+    tag = serializers.CharField(allow_blank=True)
+    suggestedToolName = serializers.CharField()
+    enabledForMcp = serializers.BooleanField()
+    parametersCount = serializers.IntegerField()
+    applicationId = serializers.CharField()
+    applicationName = serializers.CharField()
+    serverId = serializers.CharField()
+    serverName = serializers.CharField()
+
+
+class ListDiscoveredEndpointsResponseSerializer(serializers.Serializer):
+    endpoints = DiscoveredEndpointSerializer(many=True)
+
+
 SAMPLE_OUTPUT_TYPES = ["success", "empty", "validation_error", "auth_error", "business_error"]
 
 
