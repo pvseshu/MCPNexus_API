@@ -10,13 +10,16 @@ from rest_framework.response import Response
 from rest_framework import status
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from projects.credentials import TokenError, fetch_token
+from embeddings.services import reindex_tool, remove_tool_from_index
 from projects.models import Project
 from .models import Tool
 from .serializers import (
     ExecuteToolRequestSerializer,
     ExecuteToolResponseSerializer,
     ListMcpToolsResponseSerializer,
+    ToolDetailResponseSerializer,
     ToolDetailSerializer,
+    UpdateToolRequestSerializer,
 )
 
 
@@ -54,6 +57,15 @@ def tool_status_label(tool):
     return "Active" if tool.required_permission else "Needs Configuration"
 
 
+def ai_readiness_score(tool):
+    """0-100, calculated on read: min(100, 75 + 5 x sample inputs + 3 x sample outputs)."""
+    return min(100, 75 + 5 * len(tool.sample_inputs) + 3 * len(tool.sample_outputs))
+
+
+def is_ai_ready(tool):
+    return bool(tool.description.strip() and tool.when_to_use.strip() and tool.when_not_to_use.strip())
+
+
 def tool_card(tool):
     project = tool.project
     return {
@@ -69,11 +81,11 @@ def tool_card(tool):
         "applicationName": project.name,
         "requiredPermission": tool.required_permission,
         "status": tool_status_label(tool),
-        "isAiReady": project.is_ai_ready,
-        # Sample payloads and usage data are not stored yet.
-        "aiReadinessScore": 0,
-        "sampleInputsCount": 0,
-        "sampleOutputsCount": 0,
+        "isAiReady": is_ai_ready(tool),
+        "aiReadinessScore": ai_readiness_score(tool),
+        "sampleInputsCount": len(tool.sample_inputs),
+        "sampleOutputsCount": len(tool.sample_outputs),
+        # No usage data is stored yet.
         "lastUsed": None,
         "callCount": 0,
     }
@@ -97,6 +109,116 @@ def list_mcp_tools(request):
         # An unknown or malformed server id simply has no tools.
         tools = tools.filter(project_id=int(match.group(1))) if match else tools.none()
     return Response({"tools": [tool_card(t) for t in tools]})
+
+
+FIXED_TOOL_FIELDS = ["name", "displayName", "sourceEndpoint", "httpMethod", "serverId"]
+
+
+def get_tool_by_id(tool_id):
+    """Tool (with project and parameters) for an id like 'tool-1', or None."""
+    match = re.fullmatch(r"tool-(\d+)", tool_id)
+    if not match:
+        return None
+    return Tool.objects.select_related("project").prefetch_related("parameters").filter(id=int(match.group(1))).first()
+
+
+def tool_detail_payload(tool):
+    card = tool_card(tool)
+    for key in ("sampleInputsCount", "sampleOutputsCount", "lastUsed", "callCount"):
+        del card[key]
+    response_schema = tool.response_schema if isinstance(tool.response_schema, dict) else {}
+    return {
+        **card,
+        "whenToUse": tool.when_to_use,
+        "whenNotToUse": tool.when_not_to_use,
+        "callSequence": tool.call_sequence,
+        "outputSchemaDescription": response_schema.get("description", ""),
+        "inputs": [
+            {
+                "name": p.name,
+                "location": p.location,
+                "type": p.data_type,
+                "required": p.required,
+                "description": p.description,
+                "exampleValue": p.default_value,
+            }
+            for p in tool.parameters.all()
+        ],
+        "sampleInputs": tool.sample_inputs,
+        "sampleOutputs": tool.sample_outputs,
+    }
+
+
+def with_sample_ids(samples, prefix, kind):
+    """Keeps the ids the client sent; new samples get the next free '<prefix>-N'."""
+    used = [int(m.group(1)) for s in samples if (m := re.fullmatch(prefix + r"-(\d+)", str(s.get("id") or "")))]
+    next_number = max(used, default=0) + 1
+    result = []
+    for sample in samples:
+        sample_id = sample.get("id") or ""
+        if not sample_id:
+            sample_id, next_number = f"{prefix}-{next_number}", next_number + 1
+        result.append({
+            "id": str(sample_id),
+            "name": sample["name"].strip(),
+            "description": sample.get("description") or "",
+            "type": "success" if kind == "input" else (sample.get("type") or "success"),
+            "payload": sample["payload"],
+        })
+    return result
+
+
+@extend_schema(methods=["GET"], responses={200: ToolDetailResponseSerializer})
+@extend_schema(methods=["PATCH"], request=UpdateToolRequestSerializer, responses={200: ToolDetailResponseSerializer})
+@api_view(["GET", "PATCH"])
+def mcp_tool_detail(request, tool_id):
+    """
+    GET   /api/mcp-tools/{id}  everything the Configure Tool popup shows.
+    PATCH /api/mcp-tools/{id}  partial update of the fields that popup edits.
+    """
+    tool = get_tool_by_id(tool_id)
+    if tool is None:
+        return Response({"error": "MCP tool not found."}, status=status.HTTP_404_NOT_FOUND)
+
+    if request.method == "GET":
+        return Response({"tool": tool_detail_payload(tool)})
+
+    fixed = [key for key in FIXED_TOOL_FIELDS if key in request.data]
+    if fixed:
+        return Response({"error": f"{', '.join(fixed)} cannot be changed here."}, status=status.HTTP_400_BAD_REQUEST)
+
+    req = UpdateToolRequestSerializer(data=request.data)
+    req.is_valid(raise_exception=True)
+    data = req.validated_data
+
+    columns = {
+        "description": "description",
+        "requiredPermission": "required_permission",
+        "whenToUse": "when_to_use",
+        "whenNotToUse": "when_not_to_use",
+        "callSequence": "call_sequence",
+    }
+    for field, column in columns.items():
+        if field in data:
+            setattr(tool, column, data[field])
+    if "sampleInputs" in data:
+        tool.sample_inputs = with_sample_ids(data["sampleInputs"], "si", "input")
+    if "sampleOutputs" in data:
+        tool.sample_outputs = with_sample_ids(data["sampleOutputs"], "so", "output")
+
+    was_active = tool.status == "active"
+    if "status" in data:
+        tool.status = data["status"].lower()
+    tool.save()
+
+    # Vector DB (best effort): disabled tools are not searchable, enabled ones need a current vector.
+    if tool.status != "active":
+        if was_active:
+            remove_tool_from_index(tool.id)
+    elif not was_active or {"description", "whenToUse", "whenNotToUse"} & data.keys():
+        reindex_tool(tool)
+
+    return Response({"tool": tool_detail_payload(tool)})
 
 
 UPSTREAM_TIMEOUT = 30.0

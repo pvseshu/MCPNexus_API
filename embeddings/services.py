@@ -129,7 +129,7 @@ def _project_text(project):
 
 def _tool_text(tool):
     """Same idea as _project_text, but for one MCP tool."""
-    parts = [tool.name, tool.display_name, tool.summary, tool.description]
+    parts = [tool.name, tool.display_name, tool.summary, tool.description, tool.when_to_use, tool.when_not_to_use]
     return "\n".join(p for p in parts if p)
 
 
@@ -190,6 +190,65 @@ def index_application(project, tools):
         )
 
     logger.info("Indexed project %s + %d tool(s) into Qdrant.", project.id, len(tools))
+    return True
+
+
+def reindex_tool(tool):
+    """Re-embed one tool, e.g. after its description or usage guidance was edited.
+
+    Best effort like reindex_project. Disabled tools are not indexed, so they are skipped.
+    """
+    if tool.status != "active":
+        return False
+    client = _get_qdrant_client()
+    if client is None:
+        return False
+
+    from qdrant_client.models import PointStruct
+
+    vectors = _embed([_tool_text(tool)])
+    if vectors is None:
+        return False
+
+    _ensure_collection(client, settings.QDRANT_TOOLS_COLLECTION)
+    client.upsert(
+        collection_name=settings.QDRANT_TOOLS_COLLECTION,
+        points=[
+            PointStruct(
+                id=tool.id,
+                vector=vectors[0],
+                payload={
+                    "tool_id": tool.id,
+                    "project_id": tool.project_id,
+                    "name": tool.name,
+                    "required_permission": tool.required_permission,
+                },
+            )
+        ],
+    )
+    logger.info("Re-indexed tool %s into Qdrant.", tool.id)
+    return True
+
+
+def remove_tool_from_index(tool_id):
+    """Drop one tool's vector from Qdrant, e.g. when the tool is disabled. Best effort."""
+    client = _get_qdrant_client()
+    if client is None:
+        return False
+
+    from qdrant_client.models import PointIdsList
+
+    try:
+        if not client.collection_exists(settings.QDRANT_TOOLS_COLLECTION):
+            return True
+        client.delete(
+            collection_name=settings.QDRANT_TOOLS_COLLECTION,
+            points_selector=PointIdsList(points=[tool_id]),
+        )
+    except Exception as e:
+        logger.warning("Could not remove tool %s from Qdrant (%s).", tool_id, e)
+        return False
+    logger.info("Removed tool %s from Qdrant.", tool_id)
     return True
 
 

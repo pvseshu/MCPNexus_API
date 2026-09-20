@@ -32,6 +32,13 @@ class Tool(models.Model):
     # Permission string the governance layer checks (e.g. "MCP_GETCUSTOMER").
     required_permission = models.CharField(max_length=200, blank=True, default="")
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="active")
+    # AI usage guidance and samples edited in the "Configure Tool" popup (API.md #10 / #11).
+    when_to_use = models.TextField(blank=True, default="")
+    when_not_to_use = models.TextField(blank=True, default="")
+    call_sequence = models.TextField(blank=True, default="")
+    # Always read and replaced as a whole list, so they are JSON on the tool, not rows.
+    sample_inputs = models.JSONField(default=list, blank=True)
+    sample_outputs = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
