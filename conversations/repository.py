@@ -1,7 +1,9 @@
-"""Database access for the chat pipeline (Postgres reads only)."""
+"""Database access for the chat pipeline."""
 import logging
 
 from tools.models import Tool
+
+from .models import ConversationLog
 
 logger = logging.getLogger(__name__)
 
@@ -69,4 +71,29 @@ class ToolRepository:
             .prefetch_related("parameters")
             .filter(project=project, name=name)
             .first()
+        )
+
+
+class ConversationRepository:
+    @staticmethod
+    def save_turn(user, session_id, project, message, reply, trace):
+        """Save one chat turn: the question, the reply, and what happened on the way (tools, API calls).
+
+        `reply` is the {"status", "message", "list"} dict returned to the client; `trace` is filled in by the pipeline.
+        """
+        return ConversationLog.objects.create(
+            user=user,
+            session_id=session_id,
+            matched_project=project,
+            project_name=project.name,
+            question=message,
+            final_answer=reply["message"],
+            answer_items=reply["list"],
+            status=reply["status"],
+            outcome=trace["outcome"],
+            api_called=bool(trace["result_summary"]),
+            tools_matched=trace["tools_matched"],
+            tools_called=trace["tools_called"],
+            parameters_used=trace["parameters_used"],
+            result_summary=trace["result_summary"],
         )

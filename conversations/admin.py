@@ -7,12 +7,13 @@ from .models import ConversationLog
 class ConversationLogAdmin(admin.ModelAdmin):
     list_display = (
         "id",
-        "user",
         "session_id",
-        "matched_project",
+        "project_name",
         "question",
+        "outcome",
+        "api_called",
         "created_at",
     )
-    list_filter = ("matched_project", "created_at")
+    list_filter = ("matched_project", "outcome", "api_called", "created_at")
     search_fields = ("question", "final_answer", "session_id")
     readonly_fields = ("created_at",)
