@@ -27,4 +27,4 @@ def send_chat_message(request):
     except Project.DoesNotExist:
         return Response({"error": f"Application '{public_id}' not found"}, status=status.HTTP_400_BAD_REQUEST)
 
-    return Response({"reply": answer(project, data["message"])})
+    return Response(answer(project, data["message"]))

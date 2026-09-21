@@ -20,4 +20,6 @@ class SendChatRequestSerializer(serializers.Serializer):
 
 
 class SendChatResponseSerializer(serializers.Serializer):
-    reply = serializers.CharField()
+    status = serializers.ChoiceField(choices=["success", "error"])
+    message = serializers.CharField()
+    list = serializers.ListField(child=serializers.CharField())
