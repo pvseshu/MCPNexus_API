@@ -22,9 +22,10 @@ from .tool_executor import ToolExecutor
 logger = logging.getLogger(__name__)
 
 RETRY_THRESHOLD_STEP = 0.05
-MAX_RETRIES = 3
+MAX_RETRIES = 1
 MIN_MATCHES = 4
 SESSION_ID_LENGTH = 10
+PREVIOUS_API_TURNS = 3  # earlier successful API turns of the session passed to step 4
 RESPONSE_PREVIEW_CHARS = 8000  # how much of an API response is kept in the conversation log
 
 # TODO: Shrink the response before we send to model, to avoid hitting the model's max context length. The model can handle 120k chars, but we don't want to send that much. We can summarize or truncate the response before sending it to the model.
@@ -57,13 +58,12 @@ def _summarize_result(result):
 
 def answer(project, message, session_id=None, user=None):
     """Run one chat turn and save it. Returns {"sessionId", "status", "message", "list"}.
-
     `session_id` ties the turns of one chat window together; a new one is created when it is empty.
     """
     session_id = session_id or new_session_id()
     trace = {"outcome": "", "tools_matched": [], "tools_called": [], "parameters_used": {}, "result_summary": {}}
 
-    reply = _run(project, message, trace)
+    reply = _run(project, message, session_id, trace)
 
     try:
         ConversationRepository.save_turn(user, session_id, project, message, reply, trace)
@@ -73,21 +73,23 @@ def answer(project, message, session_id=None, user=None):
     return {"sessionId": session_id, **reply}
 
 
-def _run(project, message, trace):
+def _run(project, message, session_id, trace):
     """The chat pipeline for one message; fills `trace` with what happened and returns the reply dict."""
     logger.info(
         "[chat] message=%r | application: id=%s public_id=%s name=%r app_code=%r status=%s",
         message, project.id, project.public_id, project.name, project.app_code, project.status,
     )
 
+    # Step 1: Llama checks the message is about the application (otherwise reply directly and stop).
     check = check_relevance(project, message)
-    logger.info("[chat] relevance check: %s", json.dumps(check))
+    logger.info("[chat] step 1 - relevance check: %s", json.dumps(check))
     if check and not check["is_app_related"]:
         trace["outcome"] = "not_app_related"
         return _reply(check["response"] or f"How can I help you with the {project.name} application?")
 
     logger.info("[chat] application description=%r ai_context=%s", project.description, project.ai_context)
 
+    # Step 2: search Qdrant for matching tools, retrying at a lower threshold while there are too few.
     matches = search_tools(message, project.id)
     threshold = settings.TOOL_MATCH_THRESHOLD
     for _ in range(MAX_RETRIES):
@@ -112,13 +114,19 @@ def _run(project, message, trace):
         return _reply(no_match_reply(project, message))
     else:
         for m in matches:
-            logger.info("[chat] match: score=%.3f tool_id=%s name=%s", m["score"], m["tool_id"], m["name"])
+            logger.info("[chat] step 2 - match: score=%.3f tool_id=%s name=%s", m["score"], m["tool_id"], m["name"])
+
+        # Step 3: load the full details (with parameters) of the matched tools from Postgres.
         tools = ToolRepository.get_matched_tool_details(project, matches)
         for t in tools:
-            logger.info("[chat] tool details from Postgres: %s", json.dumps(t, indent=2, default=str))
+            logger.info("[chat] step 3 - tool details from Postgres: %s", json.dumps(t, indent=2, default=str))
 
-        selection = ToolSelector.select_tool(project, message, tools)
-        logger.info("[chat] tool selection (GPT-5.2): %s", json.dumps(selection, indent=2, default=str))
+        # Step 4: GPT-5.2 picks the tool(s) that answer the question and fills in their parameters.
+        # It also gets the last successful API turns of this chat window, so a parameter the user only
+        # implies ("the second one") can be taken from an earlier API response.
+        previous = ConversationRepository.get_recent_api_turns(session_id, project, PREVIOUS_API_TURNS)
+        selection = ToolSelector.select_tool(project, message, tools, previous)
+        logger.info("[chat] step 4 - tool selection (GPT-5.2): %s", json.dumps(selection, indent=2, default=str))
         if selection is None:
             trace["outcome"] = "selection_failed"
             return _reply("Sorry, I couldn't work out which action to use right now. Please try again.", "error")

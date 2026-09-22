@@ -97,3 +97,25 @@ class ConversationRepository:
             parameters_used=trace["parameters_used"],
             result_summary=trace["result_summary"],
         )
+
+    @staticmethod
+    def get_recent_api_turns(session_id, project, limit=3):
+        """The last `limit` turns of this chat window where an API was called and the turn succeeded, oldest first.
+
+        Each item: {"question", "answer", "tools_called", "api_responses"}. `api_responses` is
+        {tool_name: response JSON text}; the text is the (possibly cut short) copy saved in the log.
+        """
+        rows = list(
+            ConversationLog.objects.filter(
+                session_id=session_id, matched_project=project, api_called=True, status="success"
+            ).order_by("-id")[:limit]
+        )
+        return [
+            {
+                "question": r.question,
+                "answer": r.final_answer,
+                "tools_called": r.tools_called,
+                "api_responses": {name: (s or {}).get("responsePreview", "") for name, s in r.result_summary.items()},
+            }
+            for r in reversed(rows)
+        ]
