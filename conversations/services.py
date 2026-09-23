@@ -61,7 +61,14 @@ def answer(project, message, session_id=None, user=None):
     `session_id` ties the turns of one chat window together; a new one is created when it is empty.
     """
     session_id = session_id or new_session_id()
-    trace = {"outcome": "", "tools_matched": [], "tools_called": [], "parameters_used": {}, "result_summary": {}}
+    trace = {
+        "outcome": "",
+        "tools_matched": [],
+        "tools_called": [],
+        "parameters_used": {},
+        "result_summary": {},
+        "field_mapping": {},
+    }
 
     reply = _run(project, message, session_id, trace)
 
@@ -156,6 +163,7 @@ def _run(project, message, session_id, trace):
             trace["outcome"] = "format_failed"
             return _reply("Sorry, I got the data but couldn't put together an answer. Please try again.", "error")
         trace["outcome"] = "answered"
+        trace["field_mapping"] = formatted["fieldMapping"]
         return _reply(formatted["output"], items=formatted["is_list"])
 
     return _reply("Received your message. (Step 1: application and tool matching logged on the server.)")

@@ -96,6 +96,7 @@ class ConversationRepository:
             tools_called=trace["tools_called"],
             parameters_used=trace["parameters_used"],
             result_summary=trace["result_summary"],
+            llm_formated_resp=trace.get("field_mapping") or None,
         )
 
     @staticmethod
@@ -115,7 +116,7 @@ class ConversationRepository:
                 "question": r.question,
                 "answer": r.final_answer,
                 "tools_called": r.tools_called,
-                "api_responses": {name: (s or {}).get("responsePreview", "") for name, s in r.result_summary.items()},
+                "api_responses": r.llm_formated_resp or {},
             }
             for r in reversed(rows)
         ]

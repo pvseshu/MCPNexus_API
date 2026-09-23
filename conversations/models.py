@@ -47,6 +47,7 @@ class ConversationLog(models.Model):
     tools_called = models.JSONField(default=list, blank=True)  # tool names the LLM chose
     parameters_used = models.JSONField(default=dict, blank=True)  # {tool_name: parameters}
     result_summary = models.JSONField(default=dict, blank=True)  # {tool_name: {success, httpStatus, durationMs, request, error, responsePreview}}
+    llm_formated_resp = models.JSONField(default=dict, blank=True, null=True)  # the ids/codes the LLM kept from the API response, for a later call
 
     created_at = models.DateTimeField(auto_now_add=True)
 

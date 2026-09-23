@@ -495,7 +495,7 @@ def discover_apis(swagger_urls, auth_config=None):
                         "location": param_obj.get("in", "query"),
                         "type": schema.get("type", "string"),
                         "required": bool(param_obj.get("required", False)),
-                        "description": param_obj.get("description", ""),
+                        "description": param_obj.get("description") or schema.get("description", ""),
                         "exampleValue": "" if example is None else str(example),
                     })
 

@@ -12,6 +12,8 @@ RELEVANCE_TIMEOUT_SECONDS = 60
 
 def _relevance_prompt(project, message):
     ctx = project.ai_context or {}
+    summary_cfg = project.ai_summary_config or {}
+    ai_summary_instructions = summary_cfg.get("instructions", "") if summary_cfg.get("enabled") else ""
     system = (
         "You decide whether a user's chat message is related to the application described below, "
         "i.e. a question or request the application could help with (using its use cases and workflows), "
@@ -29,15 +31,19 @@ def _relevance_prompt(project, message):
         "user 'what is the capital of France?' -> 'That's outside what I can help with, but I'm happy to help with anything in the <APP> application.'. "
         "If the message IS related to the application, use an empty string,\n"
         '  "is_app_related": true if the message is related to the application, otherwise false.\n'
-        "A message that contains a real application question, even with a greeting in front of it, IS related."
+        "A message that contains a real application question, even with a greeting in front of it, IS related.\n"
+        "The application context below may include domain-specific term mappings (for example, one word standing "
+        "in for another in this app's world). If the message uses a term that context maps to something the "
+        "application handles, treat it as related even if the surface wording looks unrelated."
     )
     system = system.replace("<APP>", project.name)
     user = (
         f"Application name: {project.name}\n"
         f"Application description: {project.description}\n"
         f"Key use cases: {_join(ctx.get('keyUseCases', []))}\n"
-        f"Common workflows: {_join(ctx.get('commonWorkflows', []))}\n\n"
-        f"User message: {message}"
+        f"Common workflows: {_join(ctx.get('commonWorkflows', []))}\n"
+        + (f"AI summary instructions: {ai_summary_instructions}\n" if ai_summary_instructions else "")
+        + f"\nUser message: {message}"
     )
     return system, user
 

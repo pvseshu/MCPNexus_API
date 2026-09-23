@@ -23,6 +23,10 @@ Rules:
 - Only use tools from the list. Never invent a tool or a parameter.
 - Parameter names must match the tool's own parameter names. Only set values the user actually gave or that \
 are clearly implied; leave out the others (never guess a value).
+- Trust only the tool's own data (its description, parameters' description/data_type/enum_values/default_value, \
+request_schema, sample_inputs). Never fill a parameter value, a field name, or a filter/query syntax from your \
+own outside knowledge of the underlying API or service - even if you recognize the API and believe you know it \
+better. If the tool's data does not say what a value or field name should be, leave that parameter out.
 - If no tool in the list fits the question, set is_find_tool to false and tool_array to [].
 - You may also get the previous questions and answers of this chat, each with the tool(s) that were called and \
 the API response JSON. If a tool needs an input parameter (in the URI/path, the query string or the input JSON) \
